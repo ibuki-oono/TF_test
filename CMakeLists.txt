@@ -40,7 +40,7 @@ add_subdirectory(pico-tflmicro)
 
 add_executable(TF_test 
     TF_test.cpp
-    pico-tflmicro/examples/hello_world/hello_world_float_model_data.cpp
+    pico-tflmicro/examples/hello_world/sensor_model_data.cpp
     pico-tflmicro/examples/hello_world/hello_world_int8_model_data.cpp
 )
 

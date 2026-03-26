@@ -1,16 +1,4 @@
-/*
- * TFLite Micro Hello World on Raspberry Pi Pico
- *
- * sin(x) を近似するモデルを使って推論を繰り返す。
- * - USB Serial に推論結果 (x, y_pred, y_true, 誤差) を出力
- * - 内蔵 LED の明るさを推論結果 (sin 波) に応じて PWM で制御
- */
-
-#include <math.h>
 #include <stdio.h>
-
-#include "hardware/irq.h"
-#include "hardware/pwm.h"
 #include "pico/stdlib.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
@@ -18,141 +6,91 @@
 #include "tensorflow/lite/micro/system_setup.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
-#include "hello_world_float_model_data.h"
+// 先ほど生成したヘッダファイルをインクルード
+#include "sensor_model_data.h"
 
-// テンソルアリーナのサイズ (バイト)
-// 実際の使用量は RecordingMicroInterpreter で計測できる
-constexpr int kTensorArenaSize = 3000;
+// ----------------------------------------------------------------
+// 設定・定数
+// ----------------------------------------------------------------
+
+// テンソルアリーナのサイズ
+// Conv1Dを使用するため、sin波モデルより多めに確保（10KB〜20KB程度）
+constexpr int kTensorArenaSize = 1024 * 20; 
 static uint8_t tensor_arena[kTensorArenaSize];
 
-// 推論する x の範囲: 0 〜 2π
-constexpr float kXrange = 2.f * 3.14159265358979f;
-
-// 1サイクルあたりの推論ステップ数 (多いほど滑らか・遅い)
-constexpr int kInferencesPerCycle = 50;
-
-// 各ステップの待機時間 (ms)
-constexpr int kStepDelayMs = 100;
+constexpr int N_TIME_STEPS = 100;
+constexpr int N_CHANNELS = 2;
 
 // ----------------------------------------------------------------
-// LED (PWM) ユーティリティ
-// ----------------------------------------------------------------
-
-// PWM を初期化して LED ピンに接続する
-static void led_pwm_init() {
-  gpio_set_function(PICO_DEFAULT_LED_PIN, GPIO_FUNC_PWM);
-  uint slice = pwm_gpio_to_slice_num(PICO_DEFAULT_LED_PIN);
-  pwm_config cfg = pwm_get_default_config();
-  // クロック分周: sysclk / 4 → カウンタが遅くなり PWM 周波数が下がる
-  pwm_config_set_clkdiv(&cfg, 4.f);
-  pwm_init(slice, &cfg, true);
-}
-
-// y_value (-1.0 〜 1.0) を LED の明るさ (0 〜 255) にマッピングして設定する
-// PWM レベルは brightness^2 にして視覚的にリニアに見せる
-static void led_set_brightness(float y_value) {
-  int brightness = (int)(127.5f * (y_value + 1.0f));
-  if (brightness < 0) brightness = 0;
-  if (brightness > 255) brightness = 255;
-  pwm_set_gpio_level(PICO_DEFAULT_LED_PIN, (uint16_t)(brightness * brightness));
-}
-
-// ----------------------------------------------------------------
-// main
+// メイン
 // ----------------------------------------------------------------
 
 int main() {
-  // Pico 標準初期化 (USB/UART stdio を有効化)
-  stdio_init_all();
+    stdio_init_all();
+    tflite::InitializeTarget();
 
-  // TFLite Micro ターゲット初期化
-  tflite::InitializeTarget();
+    sleep_ms(2000);
+    printf("=== Sensor Inference on RP2040 ===\n");
 
-  // USB シリアルが接続されるまで少し待つ
-  sleep_ms(2000);
-  printf("=== TFLite Micro Hello World on Raspberry Pi Pico ===\n");
-
-  // ----------------------------------------------------------------
-  // 1. モデルのロード
-  // ----------------------------------------------------------------
-  const tflite::Model* model = tflite::GetModel(g_hello_world_float_model_data);
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    printf("ERROR: Model schema version %d != supported %d\n",
-           model->version(), TFLITE_SCHEMA_VERSION);
-    return 1;
-  }
-  printf("Model loaded. Schema version: %d\n", model->version());
-
-  // ----------------------------------------------------------------
-  // 2. オペレータの登録
-  //    hello_world モデルは FullyConnected のみ使用
-  // ----------------------------------------------------------------
-  static tflite::MicroMutableOpResolver<1> resolver;
-  if (resolver.AddFullyConnected() != kTfLiteOk) {
-    printf("ERROR: Failed to add FullyConnected op\n");
-    return 1;
-  }
-
-  // ----------------------------------------------------------------
-  // 3. インタープリタの構築とテンソルのアロケート
-  // ----------------------------------------------------------------
-  static tflite::MicroInterpreter interpreter(model, resolver, tensor_arena,
-                                              kTensorArenaSize);
-  if (interpreter.AllocateTensors() != kTfLiteOk) {
-    printf("ERROR: AllocateTensors() failed\n");
-    return 1;
-  }
-
-  // 入出力テンソルへのポインタを取得
-  TfLiteTensor* input = interpreter.input(0);
-  TfLiteTensor* output = interpreter.output(0);
-
-  printf("Arena used: %d bytes\n", (int)interpreter.arena_used_bytes());
-  printf("Input  tensor: type=%d shape=[%d]\n", input->type,
-         input->dims->data[0]);
-  printf("Output tensor: type=%d shape=[%d]\n", output->type,
-         output->dims->data[0]);
-  printf("Starting inference loop (step=%dms x %d steps per cycle)...\n\n",
-         kStepDelayMs, kInferencesPerCycle);
-
-  // LED 初期化
-  led_pwm_init();
-
-  // ----------------------------------------------------------------
-  // 4. 推論ループ
-  // ----------------------------------------------------------------
-  int step = 0;
-  while (true) {
-    // 現在のステップから x を計算 (0 〜 2π)
-    float position =
-        static_cast<float>(step) / static_cast<float>(kInferencesPerCycle);
-    float x = position * kXrange;
-
-    // 入力テンソルに x を書き込む
-    input->data.f[0] = x;
-
-    // 推論実行
-    if (interpreter.Invoke() != kTfLiteOk) {
-      printf("ERROR: Invoke() failed at x=%.3f\n", (double)x);
-      break;
+    // 1. モデルのロード
+    const tflite::Model* model = tflite::GetModel(g_sensor_model_data);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        printf("Model version mismatch!\n");
+        return 1;
     }
 
-    // 推論結果の取得
-    float y_pred = output->data.f[0];
-    float y_true = sinf(x);
-    float err = fabsf(y_true - y_pred);
+    // 2. オペレータの登録
+    // TFLite は Conv1D を Conv2D + ExpandDims/Squeeze に変換するため 2D 系を登録する
+    static tflite::MicroMutableOpResolver<9> resolver;
+    resolver.AddConv2D();            // Conv1D → Conv2D に変換される
+    resolver.AddMaxPool2D();         // MaxPooling1D → MaxPool2D に変換される
+    resolver.AddMean();              // GlobalAveragePooling1D 用
+    resolver.AddFullyConnected();    // Dense 用
+    resolver.AddRelu();              // 活性化関数用
+    resolver.AddLogistic();          // 出力の Sigmoid 用
+    resolver.AddExpandDims();        // 1D→2D 変換用
+    resolver.AddSqueeze();           // 2D→1D 変換用
+    resolver.AddReshape();           // 形状変換用
 
-    // 結果を USB Serial に出力
-    printf("step=%3d  x=%6.3f  y_pred=%7.4f  y_true=%7.4f  err=%.4f\n", step,
-           (double)x, (double)y_pred, (double)y_true, (double)err);
+    // 3. インタープリタの構築
+    static tflite::MicroInterpreter interpreter(
+            model, resolver, tensor_arena, kTensorArenaSize);
 
-    // LED の明るさを推論結果に応じて設定
-    led_set_brightness(y_pred);
+    if (interpreter.AllocateTensors() != kTfLiteOk) {
+        printf("AllocateTensors() failed\n");
+        return 1;
+    }
 
-    // 次のステップへ (サイクル末尾で折り返す)
-    step = (step + 1) % kInferencesPerCycle;
-    sleep_ms(kStepDelayMs);
-  }
+    TfLiteTensor* input = interpreter.input(0);
+    TfLiteTensor* output = interpreter.output(0);
 
-  return 0;
+    printf("Inference ready. Arena used: %d bytes\n", (int)interpreter.arena_used_bytes());
+
+    // 4. 推論ループ（例としてダミーデータで推論）
+    while (true) {
+        // 本来はここでセンサーから100サンプル溜まったバッファをコピーする
+        // 入力形状は [1, 100, 2] なので、data.f[0] 〜 data.f[199] まで埋める
+        for (int i = 0; i < N_TIME_STEPS * N_CHANNELS; ++i) {
+            // 学習時の正規化（/128.0）を忘れずに適用すること
+            input->data.f[i] = 0.0f; 
+        }
+
+        // 推論実行
+        uint32_t start_time = to_ms_since_boot(get_absolute_time());
+        if (interpreter.Invoke() != kTfLiteOk) {
+            printf("Invoke() failed\n");
+        }
+        uint32_t end_time = to_ms_since_boot(get_absolute_time());
+
+        // 結果の取得（Sigmoid出力なので 0.0 〜 1.0）
+        float prediction = output->data.f[0];
+        int label = (prediction > 0.5f) ? 1 : 0;
+
+        printf("Pred: %.4f -> Label: %d (Time: %u ms)\n",
+                (double)prediction, label, (unsigned)(end_time - start_time));
+
+        sleep_ms(500);
+    }
+
+    return 0;
 }
