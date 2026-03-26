@@ -18,6 +18,7 @@ bitloop:
 #include "hardware/clocks.h"
 
 static inline void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin, uint baud) {
+    pio_gpio_init(pio, pin);                              // GPIO を PIO モードに切り替え
     pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
     gpio_pull_up(pin);  // アイドル時 High を保証
     pio_sm_config c = uart_rx_program_get_default_config(offset);

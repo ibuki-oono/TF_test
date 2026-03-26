@@ -17,7 +17,6 @@
 #define PIO_UART     pio0
 #define BAUD_RATE    115200
 #define UART_RX_PIN  10   // GPIO10（PIO ソフトシリアル RX）
-#define UART_TX_PIN  11   // GPIO11（今回は未使用）
 #define LED_PIN      25   // Pico 2 オンボード LED
 
 // ----------------------------------------------------------------
@@ -44,7 +43,9 @@ static bool push_line(const char* line) {
     if (sscanf(line, "%f,%f", &x, &y) != 2) {
         return false;
     }
-    // 学習時と同じ正規化をここで適用すること（例: x /= 128.0f; など）
+    // 学習時と同じ正規化（-128~127 → -1.0~1.0）
+    x /= 128.0f;
+    y /= 128.0f;
     sample_buf[sample_count][0] = x;
     sample_buf[sample_count][1] = y;
     ++sample_count;
@@ -105,7 +106,13 @@ int main() {
     TfLiteTensor* output = interpreter.output(0);
 
     printf("Arena used: %d bytes\n", (int)interpreter.arena_used_bytes());
-    printf("Waiting for data (format: xx,yy)...\n");
+    // 入力テンソルの型と形状を確認
+    printf("Input type: %d (1=float32), dims: %d\n",
+           input->type, input->dims->size);
+    for (int i = 0; i < input->dims->size; ++i) {
+        printf("  dim[%d] = %d\n", i, input->dims->data[i]);
+    }
+    printf("Collecting %d samples (format: xx,yy)...\n", N_TIME_STEPS);
 
     // 4. メインループ：PIO UART から 1 文字ずつ受信してラインを組み立てる
     while (true) {
@@ -122,6 +129,7 @@ int main() {
             line_pos = 0;
 
             bool full = push_line(line_buf);
+            printf("[%d/%d] %s\n", sample_count, N_TIME_STEPS, line_buf);
 
             if (full) {
                 // 5. 入力テンソルに格納（形状 [1, 100, 2]）
@@ -131,6 +139,14 @@ int main() {
                     }
                 }
                 sample_count = 0; // バッファをリセットして次の 100 サンプルへ
+
+                // デバッグ：最初の3サンプルの入力値を確認
+                printf("Input[0]: %.3f, %.3f\n",
+                       (double)input->data.f[0], (double)input->data.f[1]);
+                printf("Input[1]: %.3f, %.3f\n",
+                       (double)input->data.f[2], (double)input->data.f[3]);
+                printf("Input[2]: %.3f, %.3f\n",
+                       (double)input->data.f[4], (double)input->data.f[5]);
 
                 // 6. 推論実行
                 uint32_t t0 = to_ms_since_boot(get_absolute_time());
@@ -144,11 +160,16 @@ int main() {
                 float prediction = output->data.f[0];
                 int   label      = (prediction > 0.5f) ? 1 : 0;
 
-                // 8. LED 制御（label=1 で点灯、0 で消灯）
-                gpio_put(LED_PIN, label);
+                // 8. LED 制御（label=1 で 1 秒点灯、0 で消灯）
+                if (label == 1) {
+                    gpio_put(LED_PIN, 1);
+                    sleep_ms(1000);
+                    gpio_put(LED_PIN, 0);
+                }
 
                 printf("Pred: %.4f -> Label: %d (%u ms)\n",
                        (double)prediction, label, (unsigned)(t1 - t0));
+                printf("Collecting next %d samples...\n", N_TIME_STEPS);
             }
         } else if (line_pos < (int)sizeof(line_buf) - 1) {
             line_buf[line_pos++] = c;

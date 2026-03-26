@@ -40,16 +40,14 @@ add_subdirectory(pico-tflmicro)
 
 add_executable(TF_test
     TF_test.cpp
-    pico-tflmicro/examples/hello_world/sensor_model_data.cpp
-    pico-tflmicro/examples/hello_world/hello_world_int8_model_data.cpp
+    sensor_model_data.cpp
 )
 
 # uart_rx.pio から uart_rx.pio.h を自動生成する
 pico_generate_pio_header(TF_test ${CMAKE_CURRENT_LIST_DIR}/uart_rx.pio)
 
 target_include_directories(TF_test PRIVATE
-    pico-tflmicro/src  # クローンしたリポジトリのルート
-    pico-tflmicro/examples/hello_world  # モデルデータかつヘッダーファイルのディレクトリ
+    pico-tflmicro/src
 )
 
 pico_set_program_name(TF_test "TF_test")
