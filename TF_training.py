@@ -122,7 +122,9 @@ print(f"Evaluation samples: {len(x_test_all)}")
 # --- 2. モデル構築 ---
 model = tf.keras.models.Sequential([
     tf.keras.layers.Input(shape=(N_TIME_STEPS, N_CHANNELS)),
-    tf.keras.layers.Conv1D(16, 3, activation='relu'),
+    tf.keras.layers.Conv1D(32, 3, activation='relu'),
+    tf.keras.layers.MaxPooling1D(2),
+    tf.keras.layers.Conv1D(64, 3, activation='relu'),
     tf.keras.layers.MaxPooling1D(2),
     tf.keras.layers.GlobalAveragePooling1D(),
     tf.keras.layers.Dense(16, activation='relu'),

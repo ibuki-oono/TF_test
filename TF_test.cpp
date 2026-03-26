@@ -22,7 +22,7 @@
 // ----------------------------------------------------------------
 // TFLite 設定
 // ----------------------------------------------------------------
-constexpr int kTensorArenaSize = 1024 * 20;
+constexpr int kTensorArenaSize = 1024 * 60;
 static uint8_t tensor_arena[kTensorArenaSize];
 
 constexpr int N_TIME_STEPS = 100;
