@@ -38,11 +38,14 @@ pico_sdk_init()
 # 3. pico-tflmicro ライブラリの追加
 add_subdirectory(pico-tflmicro)
 
-add_executable(TF_test 
+add_executable(TF_test
     TF_test.cpp
     pico-tflmicro/examples/hello_world/sensor_model_data.cpp
     pico-tflmicro/examples/hello_world/hello_world_int8_model_data.cpp
 )
+
+# uart_rx.pio から uart_rx.pio.h を自動生成する
+pico_generate_pio_header(TF_test ${CMAKE_CURRENT_LIST_DIR}/uart_rx.pio)
 
 target_include_directories(TF_test PRIVATE
     pico-tflmicro/src  # クローンしたリポジトリのルート
@@ -60,7 +63,8 @@ pico_enable_stdio_usb(TF_test 1)
 target_link_libraries(TF_test
         pico_stdlib
         pico-tflmicro
-        hardware_pwm
+        hardware_pio
+        hardware_clocks
 )
 
 # Add the standard include files to the build
