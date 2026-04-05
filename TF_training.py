@@ -2,15 +2,15 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 import os
+import random
 from glob import glob
 import matplotlib.pyplot as plt
-import os
 
 # --- 設定値 ---
-N_TIME_STEPS = 100
+N_TIME_STEPS = 200
 STRIDE = 40
 N_CHANNELS = 2
-BASE_DIR = '0326'
+BASE_DIR = '0405'
 
 def process_file(file_path):
     """CSVを読み込み、(時間, チャンネル)に転置してウィンドウ切り出し"""
@@ -45,18 +45,20 @@ def load_data_split_by_file(base_path):
         if not csv_files:
             continue
             
-        # 最初の1ファイルを評価用、残りを学習用
-        test_file = csv_files[0]
-        train_files = csv_files[1:]
+        # ランダムに2ファイルを評価用、残りを学習用
+        n_test = min(2, len(csv_files))
+        test_files = random.sample(csv_files, n_test)
+        train_files = [f for f in csv_files if f not in test_files]
 
         # 評価用データの読み込み
-        tw = process_file(test_file)
-        if len(tw) > 0:
-            x_test_info.append({
-                'filename': os.path.basename(test_file),
-                'label': int(label),
-                'data': tw
-            })
+        for test_file in test_files:
+            tw = process_file(test_file)
+            if len(tw) > 0:
+                x_test_info.append({
+                    'filename': os.path.basename(test_file),
+                    'label': int(label),
+                    'data': tw
+                })
 
         # 学習用データの読み込み
         for f in train_files:
@@ -134,29 +136,38 @@ model = tf.keras.models.Sequential([
 model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
 # --- 3. 学習 ---
-history = model.fit(X_train, y_train, epochs=30, batch_size=32, 
+history = model.fit(X_train, y_train, epochs=100, batch_size=32, 
                     validation_data=(x_test_all, y_test_all), verbose=1)
 
 # --- 4. 詳細評価 ---
 print("\n" + "="*30)
 print("DETAILED EVALUATION")
+print(f"(sliding window: {N_TIME_STEPS} steps, stride {STRIDE})")
 print("="*30)
 
+correct_files = 0
+total_files = 0
+
 for info in test_info_list:
-    predictions = model.predict(info['data'], verbose=0)
-    # 0.5を閾値として判定
-    pred_labels = (predictions > 0.5).astype(int)
-    accuracy = np.mean(pred_labels == info['label'])
-    
-    print(f"File: {info['filename']}")
-    print(f"  True Label: {info['label']}")
-    print(f"  Accuracy:   {accuracy:.2%}")
-    print(f"  Raw Output Average: {np.mean(predictions):.4f}")
-    
-    # 判定ミスがあった場合の表示
-    if accuracy < 1.0:
-        error_indices = np.where(pred_labels.flatten() != info['label'])[0]
-        print(f"  Mistakes at window indices: {error_indices[:10]}...") 
+    predictions = model.predict(info['data'], verbose=0)  # shape: (n_windows, 1)
+    n_windows = len(predictions)
+
+    # ウィンドウごとの予測を平均してファイル全体の判定を行う
+    mean_pred = float(np.mean(predictions))
+    file_label = 1 if mean_pred > 0.5 else 0
+    correct = (file_label == info['label'])
+    correct_files += int(correct)
+    total_files += 1
+
+    result_mark = "OK" if correct else "NG"
+    print(f"[{result_mark}] {info['filename']}")
+    print(f"  True Label:    {info['label']}")
+    print(f"  Windows:       {n_windows}")
+    print(f"  Mean pred:     {mean_pred:.4f}  ->  Label: {file_label}")
+    per_window = (predictions.flatten() > 0.5).astype(int)
+    print(f"  Window labels: {per_window.tolist()}")
+
+print(f"\nFile-level accuracy: {correct_files}/{total_files} ({correct_files/total_files:.0%})")
 
 # --- 5. TFLite 保存 ---
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
