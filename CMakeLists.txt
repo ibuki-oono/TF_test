@@ -60,9 +60,11 @@ pico_enable_stdio_usb(TF_test 1)
 # Add the standard library to the build
 target_link_libraries(TF_test
         pico_stdlib
+        pico_multicore
         pico-tflmicro
         hardware_pio
         hardware_clocks
+        hardware_uart
 )
 
 # Add the standard include files to the build
