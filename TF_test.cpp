@@ -36,29 +36,50 @@ constexpr int N_TIME_STEPS = 200;
 constexpr int N_CHANNELS   = 2;
 
 // ----------------------------------------------------------------
-// ダブルバッファ（Core0 が書き込み、Core1 が読み出し）
-// Core0 が buf[write_idx] に溜め、満杯になったら Core1 に送る。
-// Core0 は次の buf[1-write_idx] に書き始め、Core1 の処理中も継続できる。
+// ダブルバッファ（Core0 → Core1 への転送用）
 // ----------------------------------------------------------------
 static float sample_buf[2][N_TIME_STEPS][N_CHANNELS];
-static int   write_buf_idx  = 0;  // Core0 が現在書き込んでいるバッファ
+static int   write_buf_idx = 0;
 
+// ----------------------------------------------------------------
 // Core0 ローカル状態
+// ----------------------------------------------------------------
 static char line_buf[64];
-static int  line_pos     = 0;
-static int  sample_count = 0;
+static int  line_pos = 0;
 
-// "xx,yy" をパースして正規化し sample_buf に追加。100 個で true を返す。
+// リングバッファ：常に直近 N_TIME_STEPS サンプルを保持する
+static float ring_buf[N_TIME_STEPS][N_CHANNELS];
+static int   ring_head  = 0;  // 次に書き込む位置
+static int   ring_count = 0;  // 有効サンプル数（最大 N_TIME_STEPS）
+
+// "xx,yy" をパースして正規化しリングバッファに追加する
 static bool push_line(const char* line) {
     float x, y;
     if (sscanf(line, "%f,%f", &x, &y) != 2) return false;
     x /= 128.0f;
     y /= 128.0f;
-    sample_buf[write_buf_idx][sample_count][0] = x;
-    sample_buf[write_buf_idx][sample_count][1] = y;
-    ++sample_count;
-    return sample_count >= N_TIME_STEPS;
+    ring_buf[ring_head][0] = x;
+    ring_buf[ring_head][1] = y;
+    ring_head = (ring_head + 1) % N_TIME_STEPS;
+    if (ring_count < N_TIME_STEPS) ++ring_count;
+    return true;
 }
+
+// リングバッファの内容を時系列順に dst へコピーする
+static void copy_ring_to_buf(float dst[N_TIME_STEPS][N_CHANNELS]) {
+    int start = ring_head;  // バッファ満杯時は最も古いデータの位置
+    for (int i = 0; i < N_TIME_STEPS; ++i) {
+        int idx = (start + i) % N_TIME_STEPS;
+        dst[i][0] = ring_buf[idx][0];
+        dst[i][1] = ring_buf[idx][1];
+    }
+}
+
+// ----------------------------------------------------------------
+// Core間通信の値
+// ----------------------------------------------------------------
+#define MSG_READY   0xFFFFFFFFu  // Core1 → Core0: 初期化完了
+#define MSG_REQUEST 0x00000001u  // Core1 → Core0: スナップショット要求
 
 // ----------------------------------------------------------------
 // Core1: TFLite 推論
@@ -97,8 +118,9 @@ void core1_entry() {
 
     printf("[Core1] Ready. Arena: %d bytes\n", (int)interpreter.arena_used_bytes());
 
-    // Core0 に初期化完了を通知
-    multicore_fifo_push_blocking(1);
+    // Core0 に初期化完了を通知し、最初のスナップショットを要求する
+    multicore_fifo_push_blocking(MSG_READY);
+    multicore_fifo_push_blocking(MSG_REQUEST);
 
     while (true) {
         // Core0 からバッファインデックスが届くまで待機
@@ -115,31 +137,34 @@ void core1_entry() {
         uint32_t t0 = to_ms_since_boot(get_absolute_time());
         if (interpreter.Invoke() != kTfLiteOk) {
             printf("[Core1] Invoke() failed\n");
-            continue;
+        } else {
+            uint32_t t1 = to_ms_since_boot(get_absolute_time());
+
+            float prediction = output->data.f[0];
+            int   label      = (prediction > 0.5f) ? 1 : 0;
+
+            printf("[Core1] Pred: %.4f -> Label: %d (%u ms)\n",
+                   (double)prediction, label, (unsigned)(t1 - t0));
+
+            // 推論結果を UART0 (GPIO0/1) に送信（小数点以下2桁）
+            char result_buf[16];
+            snprintf(result_buf, sizeof(result_buf), "%.2f\n", (double)prediction);
+            uart_puts(RESULT_UART, result_buf);
+
+            if (label == 1) {
+                gpio_put(LED_PIN, 1);
+                sleep_ms(1000);
+                gpio_put(LED_PIN, 0);
+            }
         }
-        uint32_t t1 = to_ms_since_boot(get_absolute_time());
 
-        float prediction = output->data.f[0];
-        int   label      = (prediction > 0.5f) ? 1 : 0;
-
-        printf("[Core1] Pred: %.4f -> Label: %d (%u ms)\n",
-               (double)prediction, label, (unsigned)(t1 - t0));
-
-        // 推論結果を UART0 (GPIO0/1) に送信（小数点以下2桁）
-        char result_buf[16];
-        snprintf(result_buf, sizeof(result_buf), "%.2f\n", (double)prediction);
-        uart_puts(RESULT_UART, result_buf);
-
-        if (label == 1) {
-            gpio_put(LED_PIN, 1);
-            sleep_ms(1000);
-            gpio_put(LED_PIN, 0);
-        }
+        // 推論完了 → 次のスナップショットを要求
+        multicore_fifo_push_blocking(MSG_REQUEST);
     }
 }
 
 // ----------------------------------------------------------------
-// Core0: メイン（シリアル受信 + バッファ管理）
+// Core0: メイン（シリアル受信 + スナップショット供給）
 // ----------------------------------------------------------------
 int main() {
     stdio_init_all();
@@ -162,39 +187,47 @@ int main() {
     printf("=== Sensor Inference on RP2350 (dual-core) ===\n");
     printf("[Core0] Launching Core1...\n");
 
-    // Core1 を起動し、初期化完了を待つ
+    // Core1 を起動し、初期化完了シグナルを待つ
     multicore_launch_core1(core1_entry);
-    multicore_fifo_pop_blocking();
+    multicore_fifo_pop_blocking();  // MSG_READY を受け取る
 
-    printf("[Core0] Core1 ready. Collecting into buf[%d]...\n", write_buf_idx);
+    printf("[Core0] Core1 ready. Collecting %d samples...\n", N_TIME_STEPS);
 
-    // メインループ：PIO UART から 1 文字ずつ受信
+    // Core1 からのリクエストが保留中かどうか
+    bool pending_request = false;
+
+    // メインループ：PIO UART 受信 + Core1 へのスナップショット供給
     while (true) {
-        if (!uart_rx_program_readable(PIO_UART, sm)) continue;
+        // UART 受信処理
+        if (uart_rx_program_readable(PIO_UART, sm)) {
+            char c = uart_rx_program_getc(PIO_UART, sm);
 
-        char c = uart_rx_program_getc(PIO_UART, sm);
-
-        if (c == '\n' || c == '\r') {
-            if (line_pos == 0) continue;
-
-            line_buf[line_pos] = '\0';
-            line_pos = 0;
-
-            bool full = push_line(line_buf);
-            printf("[Core0] [%d/%d] %s\n", sample_count, N_TIME_STEPS, line_buf);
-
-            if (full) {
-                int sent_idx = write_buf_idx;
-                write_buf_idx = 1 - write_buf_idx;  // バッファを切り替え
-                sample_count  = 0;
-
-                // Core1 に処理を依頼（ブロッキング: SIO FIFO が満杯の場合のみ待機）
-                multicore_fifo_push_blocking((uint32_t)sent_idx);
-                printf("[Core0] -> buf[%d] sent to Core1, collecting into buf[%d]\n",
-                       sent_idx, write_buf_idx);
+            if (c == '\n' || c == '\r') {
+                if (line_pos > 0) {
+                    line_buf[line_pos] = '\0';
+                    line_pos = 0;
+                    push_line(line_buf);
+                    printf("[Core0] [%d/%d] %s\n", ring_count, N_TIME_STEPS, line_buf);
+                }
+            } else if (line_pos < (int)sizeof(line_buf) - 1) {
+                line_buf[line_pos++] = c;
             }
-        } else if (line_pos < (int)sizeof(line_buf) - 1) {
-            line_buf[line_pos++] = c;
+        }
+
+        // Core1 からのリクエストを確認（ノンブロッキング）
+        if (multicore_fifo_rvalid()) {
+            multicore_fifo_pop_blocking();  // MSG_REQUEST を消費
+            pending_request = true;
+        }
+
+        // データが 200 個揃っていればスナップショットを渡す
+        if (pending_request && ring_count >= N_TIME_STEPS) {
+            copy_ring_to_buf(sample_buf[write_buf_idx]);
+            int sent_idx  = write_buf_idx;
+            write_buf_idx = 1 - write_buf_idx;
+            multicore_fifo_push_blocking((uint32_t)sent_idx);
+            pending_request = false;
+            printf("[Core0] -> buf[%d] sent to Core1\n", sent_idx);
         }
     }
 
