@@ -29,7 +29,7 @@
 // ----------------------------------------------------------------
 // TFLite 設定
 // ----------------------------------------------------------------
-constexpr int kTensorArenaSize = 1024 * 60;
+constexpr int kTensorArenaSize = 1024 * 140;
 static uint8_t tensor_arena[kTensorArenaSize];
 
 constexpr int N_TIME_STEPS = 200;
@@ -93,16 +93,20 @@ void core1_entry() {
         return;
     }
 
-    // Conv1D は TFLite 内部で Conv2D + ExpandDims/Squeeze に変換される
-    static tflite::MicroMutableOpResolver<9> resolver;
-    resolver.AddConv2D();
-    resolver.AddMaxPool2D();
-    resolver.AddMean();           // GlobalAveragePooling1D 用
-    resolver.AddFullyConnected(); // Dense 用
-    resolver.AddRelu();
-    resolver.AddLogistic();       // Sigmoid 用
-    resolver.AddExpandDims();
-    resolver.AddSqueeze();
+    static tflite::MicroMutableOpResolver<14> resolver;
+    resolver.AddConv2D();           // Conv1D → Conv2D に変換される
+    resolver.AddMaxPool2D();        // MaxPooling1D 用
+    resolver.AddMean();             // GlobalAveragePooling1D 用
+    resolver.AddReduceMax();        // GlobalMaxPooling1D 用
+    resolver.AddFullyConnected();   // Dense 用
+    resolver.AddSoftmax();          // Dense(2, softmax) 用
+    resolver.AddLogistic();         // sigmoid + Swish(x*sigmoid(x)) 用
+    resolver.AddMul();              // Multiply層 + Swish(x*sigmoid(x)) 用
+    resolver.AddAdd();              // Add層 用
+    resolver.AddConcatenation();    // Concatenate 用
+    resolver.AddStridedSlice();     // w[:,0:1], w[:,1:2] スライス 用
+    resolver.AddExpandDims();       // Conv1D/MaxPool1D → 2D 変換用
+    resolver.AddSqueeze();          // Conv1D/MaxPool1D → 1D 戻し用
     resolver.AddReshape();
 
     static tflite::MicroInterpreter interpreter(

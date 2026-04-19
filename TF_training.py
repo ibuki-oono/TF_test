@@ -12,6 +12,36 @@ STRIDE = 40
 N_CHANNELS = 2
 BASE_DIR = '0405'
 
+def model_by_GPT4(): #GPTくんの改良案をさらに適用してみる　総パラメータ数21,763　かなり良い
+  inputs = tf.keras.layers.Input(shape=(N_TIME_STEPS, N_CHANNELS))
+
+  x = tf.keras.layers.Conv1D(48, 7, padding='same',kernel_regularizer=tf.keras.regularizers.l2(1e-4))(inputs)
+  x = tf.keras.layers.BatchNormalization()(x)
+  x = tf.keras.layers.Activation('swish')(x)
+  x = tf.keras.layers.MaxPooling1D(2)(x)
+
+  x = tf.keras.layers.Conv1D(40, 3, padding='same',kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+  x = tf.keras.layers.BatchNormalization()(x)
+  x = tf.keras.layers.Activation('swish')(x)
+
+  x1 = tf.keras.layers.GlobalMaxPooling1D()(x)
+  x2 = tf.keras.layers.GlobalAveragePooling1D()(x)
+
+  w = tf.keras.layers.Concatenate()([x1, x2])
+  w = tf.keras.layers.Dense(2, activation='softmax')(w)
+
+  x1 = tf.keras.layers.Multiply()([x1, w[:, 0:1]])
+  x2 = tf.keras.layers.Multiply()([x2, w[:, 1:2]])
+
+  x = tf.keras.layers.Add()([x1, x2])
+
+  x = tf.keras.layers.Dropout(0.1)(x)
+  x = tf.keras.layers.Dense(8, activation='swish',kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
+
+  outputs = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+
+  return tf.keras.Model(inputs, outputs)
+
 def process_file(file_path):
     """CSVを読み込み、(時間, チャンネル)に転置してウィンドウ切り出し"""
     try:
@@ -122,16 +152,18 @@ print(f"Train samples: {len(X_train)}")
 print(f"Evaluation samples: {len(x_test_all)}")
 
 # --- 2. モデル構築 ---
-model = tf.keras.models.Sequential([
-    tf.keras.layers.Input(shape=(N_TIME_STEPS, N_CHANNELS)),
-    tf.keras.layers.Conv1D(32, 3, activation='relu'),
-    tf.keras.layers.MaxPooling1D(2),
-    tf.keras.layers.Conv1D(64, 3, activation='relu'),
-    tf.keras.layers.MaxPooling1D(2),
-    tf.keras.layers.GlobalAveragePooling1D(),
-    tf.keras.layers.Dense(16, activation='relu'),
-    tf.keras.layers.Dense(1, activation='sigmoid')
-])
+# model = tf.keras.models.Sequential([
+#     tf.keras.layers.Input(shape=(N_TIME_STEPS, N_CHANNELS)),
+#     tf.keras.layers.Conv1D(32, 3, activation='relu'),
+#     tf.keras.layers.MaxPooling1D(2),
+#     tf.keras.layers.Conv1D(64, 3, activation='relu'),
+#     tf.keras.layers.MaxPooling1D(2),
+#     tf.keras.layers.GlobalAveragePooling1D(),
+#     tf.keras.layers.Dense(16, activation='relu'),
+#     tf.keras.layers.Dense(1, activation='sigmoid')
+# ])
+
+model = model_by_GPT4()
 
 model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
