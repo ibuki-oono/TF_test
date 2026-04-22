@@ -52,12 +52,10 @@ static float ring_buf[N_TIME_STEPS][N_CHANNELS];
 static int   ring_head  = 0;  // 次に書き込む位置
 static int   ring_count = 0;  // 有効サンプル数（最大 N_TIME_STEPS）
 
-// "xx,yy" をパースして正規化しリングバッファに追加する
+// "xx,yy" をパースして生の値をリングバッファに追加する（正規化はウィンドウ確定後に行う）
 static bool push_line(const char* line) {
     float x, y;
     if (sscanf(line, "%f,%f", &x, &y) != 2) return false;
-    x /= 128.0f;
-    y /= 128.0f;
     ring_buf[ring_head][0] = x;
     ring_buf[ring_head][1] = y;
     ring_head = (ring_head + 1) % N_TIME_STEPS;
@@ -65,13 +63,28 @@ static bool push_line(const char* line) {
     return true;
 }
 
-// リングバッファの内容を時系列順に dst へコピーする
+// リングバッファの直近 N_TIME_STEPS サンプルをウィンドウ正規化して dst へコピーする。
+// 正規化: ウィンドウ内の最大絶対値を 127 にスケール（-127~127）
 static void copy_ring_to_buf(float dst[N_TIME_STEPS][N_CHANNELS]) {
-    int start = ring_head;  // バッファ満杯時は最も古いデータの位置
+    int start = ring_head;
+
+    // 最大絶対値を求める
+    float max_abs = 0.0f;
     for (int i = 0; i < N_TIME_STEPS; ++i) {
         int idx = (start + i) % N_TIME_STEPS;
-        dst[i][0] = ring_buf[idx][0];
-        dst[i][1] = ring_buf[idx][1];
+        for (int ch = 0; ch < N_CHANNELS; ++ch) {
+            float v = ring_buf[idx][ch];
+            if (v < 0.0f) v = -v;
+            if (v > max_abs) max_abs = v;
+        }
+    }
+
+    // スケールして正規化（max_abs=0 のときはそのまま 0）
+    float scale = (max_abs > 0.0f) ? (127.0f / max_abs) : 0.0f;
+    for (int i = 0; i < N_TIME_STEPS; ++i) {
+        int idx = (start + i) % N_TIME_STEPS;
+        dst[i][0] = ring_buf[idx][0] * scale;
+        dst[i][1] = ring_buf[idx][1] * scale;
     }
 }
 
@@ -211,7 +224,7 @@ int main() {
                     line_buf[line_pos] = '\0';
                     line_pos = 0;
                     push_line(line_buf);
-                    printf("[Core0] [%d/%d] %s\n", ring_count, N_TIME_STEPS, line_buf);
+                    // printf("[Core0] [%d/%d] %s\n", ring_count, N_TIME_STEPS, line_buf);
                 }
             } else if (line_pos < (int)sizeof(line_buf) - 1) {
                 line_buf[line_pos++] = c;

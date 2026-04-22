@@ -42,14 +42,18 @@ def model_by_GPT4(): #GPTくんの改良案をさらに適用してみる　総�
 
   return tf.keras.Model(inputs, outputs)
 
+def normalize_window(window):
+    """ウィンドウ内の最大絶対値を127にスケールする（-127~127の整数相当）"""
+    max_abs = np.max(np.abs(window))
+    if max_abs > 0:
+        window = window * (127.0 / max_abs)
+    return window
+
 def process_file(file_path):
     """CSVを読み込み、(時間, チャンネル)に転置してウィンドウ切り出し"""
     try:
         df = pd.read_csv(file_path, header=None)
-        data = df.values  # shape: (時間ステップ数, チャンネル数)
-        
-        # 正規化（必要に応じて。ここでは-128~127を-1.0~1.0にする例）
-        data = data.astype(np.float32) / 128.0
+        data = df.values.astype(np.float32)
 
         windows = []
         if len(data) < N_TIME_STEPS:
@@ -58,7 +62,7 @@ def process_file(file_path):
         for i in range(0, len(data) - N_TIME_STEPS + 1, STRIDE):
             window = data[i : i + N_TIME_STEPS]
             if window.shape == (N_TIME_STEPS, N_CHANNELS):
-                windows.append(window)
+                windows.append(normalize_window(window))
         return np.array(windows)
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
